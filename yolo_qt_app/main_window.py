@@ -78,6 +78,7 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         self.session_meta: SessionMetadata | None = None
 
         self.infer_busy = False
+        self.batch_running = False
         self.last_infer_time = 0.0
 
         self.timer = QtCore.QTimer(self)
@@ -385,12 +386,16 @@ class YoloMainWindow(QtWidgets.QMainWindow):
 
     def update_controls(self):
         has_model = self.detector.is_loaded
-        self.image_button.setEnabled(has_model)
-        self.batch_image_button.setEnabled(has_model)
-        self.video_button.setEnabled(has_model)
-        self.camera_button.setEnabled(has_model)
-        self.compare_button.setEnabled(has_model)
-        self.stop_button.setEnabled(self.timer.isActive())
+        can_run_actions = not self.infer_busy and not self.batch_running
+        self.image_button.setEnabled(has_model and can_run_actions)
+        self.batch_image_button.setEnabled(has_model and can_run_actions)
+        self.video_button.setEnabled(has_model and can_run_actions)
+        self.camera_button.setEnabled(has_model and can_run_actions)
+        self.compare_button.setEnabled(has_model and can_run_actions)
+        self.stop_button.setEnabled(self.timer.isActive() or self.batch_running)
+        self.load_model_button.setEnabled(bool(self.model_combo.currentData()) and can_run_actions)
+        self.browse_model_button.setEnabled(can_run_actions)
+        self.refresh_model_button.setEnabled(can_run_actions)
         has_records = bool(self.records)
         self.export_csv_button.setEnabled(has_records)
         self.export_json_button.setEnabled(has_records)
@@ -448,6 +453,7 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         self.show_frame(self.original_view, frame)
         self.status_value.setText("检测中")
         self.submit_inference(frame, source=str(self.source_path), frame_index=1)
+        self.update_controls()
 
     def open_image_dir(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择图片目录", str(APP_DIR))
@@ -469,30 +475,46 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         self.start_session(self.source_type, str(self.source_path))
         self.status_value.setText("批量检测中")
         self.log(f"开始批量检测，共 {len(paths)} 张图片。")
+        self.batch_running = True
+        progress = QtWidgets.QProgressDialog("批量检测中...", "取消", 0, len(paths), self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        self.update_controls()
 
-        for index, path in enumerate(paths, start=1):
-            frame = cv2.imread(str(path))
-            if frame is None:
-                self.log(f"跳过损坏图片：{path}")
-                continue
-            self.frame_index = index
-            self.frame_value.setText(str(index))
-            self.show_frame(self.original_view, frame)
-            try:
-                result = self.detector.predict(frame, self.detection_options())
-            except Exception as exc:
-                self.log(f"批量检测失败：{path} -> {exc}")
-                continue
-            self.show_frame(self.detected_view, result.plot())
-            self.add_records(
-                records_from_result(
-                    result,
-                    source=str(path),
-                    source_type=self.source_type,
-                    frame_index=index,
+        try:
+            for index, path in enumerate(paths, start=1):
+                if progress.wasCanceled():
+                    self.log("批量检测已取消。")
+                    break
+                frame = cv2.imread(str(path))
+                if frame is None:
+                    self.log(f"跳过损坏图片：{path}")
+                    progress.setValue(index)
+                    continue
+                self.frame_index = index
+                self.frame_value.setText(str(index))
+                self.show_frame(self.original_view, frame)
+                try:
+                    result = self.detector.predict(frame, self.detection_options())
+                except Exception as exc:
+                    self.log(f"批量检测失败：{path} -> {exc}")
+                    progress.setValue(index)
+                    continue
+                self.show_frame(self.detected_view, result.plot())
+                self.add_records(
+                    records_from_result(
+                        result,
+                        source=str(path),
+                        source_type=self.source_type,
+                        frame_index=index,
+                    )
                 )
-            )
-            QtWidgets.QApplication.processEvents()
+                progress.setValue(index)
+                QtWidgets.QApplication.processEvents()
+        finally:
+            self.batch_running = False
+            progress.close()
+            self.update_controls()
 
         self.close_session()
         self.status_value.setText("批量完成")
@@ -590,6 +612,7 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         if self.source_type == "image":
             self.close_session()
             self.status_value.setText("图片完成")
+        self.update_controls()
 
     @QtCore.pyqtSlot(str)
     def on_inference_failed(self, error: str):
@@ -599,6 +622,7 @@ class YoloMainWindow(QtWidgets.QMainWindow):
             self.stop_detection(reset_views=False)
         self.status_value.setText("检测失败")
         QtWidgets.QMessageBox.critical(self, "检测失败", error)
+        self.update_controls()
 
     def add_records(self, frame_records: list[dict]):
         self.current_counts = Counter(record["class_name"] for record in frame_records)
@@ -828,7 +852,8 @@ class YoloMainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event):
         self.stop_detection(reset_views=False)
         self.infer_thread.quit()
-        self.infer_thread.wait(1000)
+        if not self.infer_thread.wait(1000):
+            self.log("警告：推理线程未在预期时间内退出。")
         super().closeEvent(event)
 
     def log(self, message: str):
