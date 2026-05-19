@@ -42,7 +42,7 @@ def run_startup_self_check() -> dict:
     for name in REQUIRED_MODULES:
         try:
             dep_status[name] = importlib.util.find_spec(name) is not None
-        except Exception:
+        except (ImportError, ModuleNotFoundError, AttributeError, ValueError):
             dep_status[name] = False
 
     devices = available_devices()
