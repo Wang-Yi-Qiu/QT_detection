@@ -59,6 +59,12 @@ python -m compileall .
 python -m unittest discover -s tests -v
 ```
 
+## 打包
+
+Windows/macOS 本地打包见：`packaging/README.md`
+
+CI 也可通过推送 `v*` 标签触发 `.github/workflows/desktop-package.yml` 自动打包。
+
 ## 支持的模型搜索格式
 
 自动模型搜索会识别文件型和目录型模型：
@@ -87,10 +93,15 @@ QT_detection/
     widgets.py                # 可复用 Qt 控件
     styles.py                 # 界面样式
     config.py                 # 路径和文件类型配置
+    self_check.py             # 启动自检
+    first_run.py              # 首次运行标记
+    task_config.py            # 任务配置保存/加载
+  packaging/                  # PyInstaller 打包脚本
   tests/
     test_config.py            # config 单元测试
     test_detector.py          # detector 单元测试
     test_exporter.py          # exporter 单元测试
+    test_self_check.py      # 启动自检单元测试
   .github/workflows/
     ci.yml                    # 自动编译检查与单元测试
     desktop-package.yml       # Windows/macOS 桌面打包

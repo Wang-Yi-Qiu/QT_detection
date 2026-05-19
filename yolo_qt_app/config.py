@@ -9,6 +9,8 @@ HISTORY_DIR = APP_DIR / "history"
 CONFIG_DIR = APP_DIR / "saved_configs"
 APP_LOG_FILE = LOG_DIR / "app.log"
 HISTORY_INDEX_FILE = HISTORY_DIR / "history.jsonl"
+TASK_CONFIG_FILE = CONFIG_DIR / "last_task_config.json"
+FIRST_RUN_MARKER_FILE = CONFIG_DIR / ".startup_self_check_done"
 
 MODEL_FILE_EXTENSIONS = {
     ".pt",
@@ -41,6 +43,8 @@ IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.webp)"
 VIDEO_FILTER = "Videos (*.mp4 *.avi *.mov *.mkv *.m4v)"
 BATCH_IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.webp)"
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+MODEL_EXTENSIONS = MODEL_FILE_EXTENSIONS
+IMAGE_EXTENSIONS = IMAGE_SUFFIXES
 EXPORT_FILTER = (
     "CSV (*.csv);;JSON (*.json);;TSV (*.tsv);;TXT Summary (*.txt)"
 )

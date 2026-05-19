@@ -13,6 +13,10 @@ class ConfigTests(unittest.TestCase):
         self.assertIn(".pt", config.MODEL_FILE_EXTENSIONS)
         self.assertIn(".onnx", config.MODEL_FILE_EXTENSIONS)
 
+    def test_startup_and_task_config_paths(self):
+        self.assertTrue(str(config.TASK_CONFIG_FILE).endswith("last_task_config.json"))
+        self.assertTrue(str(config.FIRST_RUN_MARKER_FILE).endswith(".startup_self_check_done"))
+
 
 if __name__ == "__main__":
     unittest.main()
