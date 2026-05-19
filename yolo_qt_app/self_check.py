@@ -7,6 +7,7 @@ from .model_finder import find_models
 
 
 REQUIRED_MODULES = ["cv2", "PyQt6", "ultralytics"]
+MAX_MODELS_TO_CHECK = 5
 
 
 def _check_model_roots() -> list[dict]:
@@ -25,7 +26,7 @@ def _check_model_roots() -> list[dict]:
 
 def _check_model_paths(models: list[Path]) -> list[dict]:
     status = []
-    for path in models[:5]:
+    for path in models[:MAX_MODELS_TO_CHECK]:
         status.append(
             {
                 "path": str(path),
@@ -51,7 +52,7 @@ def run_startup_self_check() -> dict:
         "devices": devices,
         "gpu_devices": gpu_devices,
         "models_found": len(models),
-        "model_examples": [str(path) for path in models[:5]],
+        "model_examples": [str(path) for path in models[:MAX_MODELS_TO_CHECK]],
         "model_roots": _check_model_roots(),
         "model_paths": model_paths,
         "cwd": str(Path.cwd()),
