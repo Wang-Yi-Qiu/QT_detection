@@ -1,0 +1,1 @@
+"""YOLO Qt detection application."""
