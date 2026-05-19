@@ -4,7 +4,7 @@
 
 功能包括：
 
-- 加载 YOLO `.pt` / `.onnx` / `.engine` 模型
+- 加载 YOLO 常见导出模型，包括 `.pt`、`.onnx`、`.engine`、`.rknn` 等
 - 图片检测
 - 视频检测
 - 摄像头实时检测
@@ -42,6 +42,18 @@ models/yolo26/yolo26n.pt
 test_images/bus.jpg
 test_images/zidane.jpg
 ```
+
+## 支持的模型搜索格式
+
+自动模型搜索会识别文件型和目录型模型：
+
+```text
+文件：.pt, .torchscript, .onnx, .engine, .mlpackage, .pb, .tflite, .mnn, .rknn
+目录：_openvino_model, _saved_model, _web_model, _paddle_model, _ncnn_model,
+     _imx_model, _rknn_model, _executorch_model, _axelera_model, _deepx_model
+```
+
+其中 RKNN 同时支持 `.rknn` 文件和 `_rknn_model` 目录。
 
 ## 文件结构
 

@@ -6,7 +6,7 @@ import cv2
 from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtCore import Qt
 
-from .config import APP_DIR, EXPORT_DIR, IMAGE_FILTER, VIDEO_FILTER
+from .config import APP_DIR, EXPORT_DIR, IMAGE_FILTER, MODEL_FILE_FILTER, VIDEO_FILTER
 from .detector import (
     DetectionOptions,
     YoloDetector,
@@ -240,7 +240,7 @@ class YoloMainWindow(QtWidgets.QMainWindow):
             self,
             "选择 YOLO 模型",
             str(APP_DIR),
-            "YOLO Models (*.pt *.onnx *.engine)",
+            MODEL_FILE_FILTER,
         )
         if not path:
             return
