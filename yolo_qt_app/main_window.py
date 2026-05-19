@@ -293,8 +293,8 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         self.count_table = QtWidgets.QTableWidget(0, 3)
         self.count_table.setHorizontalHeaderLabels(["类别", "当前", "累计"])
         self.count_table.verticalHeader().setVisible(False)
-        self.count_table.setEditTriggers(QtWidgets.QAbstractSpinBox.EditTrigger.NoEditTriggers)
-        self.count_table.setSelectionBehavior(QtWidgets.QAbstractSpinBox.SelectionBehavior.SelectRows)
+        self.count_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.count_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.count_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         parent_layout.addWidget(self.count_table, 1)
 
