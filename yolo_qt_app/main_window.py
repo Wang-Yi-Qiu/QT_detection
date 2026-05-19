@@ -1,27 +1,69 @@
+import json
+import logging
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 
 import cv2
 from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtCore import Qt
 
-from .config import APP_DIR, EXPORT_DIR, IMAGE_FILTER, VIDEO_FILTER
+from .config import (
+    APP_DIR,
+    CONFIG_DIR,
+    EXPORT_DIR,
+    IMAGE_EXTENSIONS,
+    IMAGE_FILTER,
+    LOG_DIR,
+    TASK_CONFIG_FILE,
+    VIDEO_FILTER,
+)
 from .detector import (
     DetectionOptions,
     YoloDetector,
     available_devices,
+    compare_models,
     records_from_result,
     resolve_device,
 )
 from .exporter import export_csv, export_json
+from .history import summarize_by_class, summarize_by_hour
 from .image_utils import frame_to_pixmap
 from .model_finder import find_models
+from .self_check import run_startup_self_check
+from .session import SessionMetadata
 from .styles import APP_STYLE
+from .task_config import load_task_config, save_task_config
 from .widgets import VideoLabel, section_label, stat_value
 
 
+class InferenceWorker(QtCore.QObject):
+    done = QtCore.pyqtSignal(object, str, int)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.detector = YoloDetector()
+        self.loaded_model_path = ""
+
+    @QtCore.pyqtSlot(object, object, str, str, int)
+    def infer(self, frame, options: DetectionOptions, model_path: str, source: str, frame_index: int):
+        try:
+            if not model_path:
+                raise RuntimeError("未选择模型。")
+            if self.loaded_model_path != model_path or not self.detector.is_loaded:
+                self.detector.load(model_path)
+                self.loaded_model_path = model_path
+            result = self.detector.predict(frame, options)
+            self.done.emit(result, source, frame_index)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class YoloMainWindow(QtWidgets.QMainWindow):
+    infer_requested = QtCore.pyqtSignal(object, object, str, str, int)
+
     def __init__(self):
         super().__init__()
         self.detector = YoloDetector()
@@ -33,17 +75,47 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         self.records: list[dict] = []
         self.current_counts = Counter()
         self.total_counts = Counter()
+        self.session_meta: SessionMetadata | None = None
+
+        self.infer_busy = False
+        self.last_infer_time = 0.0
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.process_next_frame)
 
+        self._setup_logger()
+        self._setup_inference_thread()
+
         self.build_ui()
         self.refresh_model_list()
+        self.run_startup_check()
         self.update_controls()
+
+    def _setup_logger(self):
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        self.logger = logging.getLogger("yolo_qt_app")
+        self.logger.setLevel(logging.INFO)
+        if not self.logger.handlers:
+            handler = logging.FileHandler(LOG_DIR / "app.log", encoding="utf-8")
+            formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+
+    def _setup_inference_thread(self):
+        self.infer_thread = QtCore.QThread(self)
+        self.infer_worker = InferenceWorker()
+        self.infer_worker.moveToThread(self.infer_thread)
+        self.infer_requested.connect(
+            self.infer_worker.infer,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
+        self.infer_worker.done.connect(self.on_inference_done)
+        self.infer_worker.failed.connect(self.on_inference_failed)
+        self.infer_thread.start()
 
     def build_ui(self):
         self.setWindowTitle("YOLO 实时检测与统计导出")
-        self.resize(1360, 820)
+        self.resize(1420, 860)
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -81,13 +153,13 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         left_panel.addLayout(video_grid, 1)
 
         self.log_box = QtWidgets.QTextBrowser()
-        self.log_box.setMinimumHeight(150)
+        self.log_box.setMinimumHeight(170)
         self.log_box.setObjectName("LogBox")
         left_panel.addWidget(self.log_box)
 
         right_panel = QtWidgets.QWidget()
         right_panel.setObjectName("SidePanel")
-        right_panel.setFixedWidth(370)
+        right_panel.setFixedWidth(410)
         right_layout = QtWidgets.QVBoxLayout(right_panel)
         right_layout.setContentsMargins(14, 14, 14, 14)
         right_layout.setSpacing(12)
@@ -102,7 +174,7 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         self.log("请先选择或加载 YOLO 模型。")
 
     def build_model_panel(self, parent_layout):
-        parent_layout.addWidget(section_label("模型"))
+        parent_layout.addWidget(section_label("模型与参数"))
         self.model_combo = QtWidgets.QComboBox()
         self.model_combo.setMinimumHeight(36)
         self.model_combo.currentIndexChanged.connect(self.model_selection_changed)
@@ -154,21 +226,49 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         options_row.addWidget(self.imgsz_spin)
         parent_layout.addLayout(options_row)
 
+        stream_row = QtWidgets.QHBoxLayout()
+        self.frame_skip_spin = QtWidgets.QSpinBox()
+        self.frame_skip_spin.setRange(0, 15)
+        self.frame_skip_spin.setValue(0)
+        self.max_fps_spin = QtWidgets.QSpinBox()
+        self.max_fps_spin.setRange(1, 120)
+        self.max_fps_spin.setValue(30)
+        stream_row.addWidget(QtWidgets.QLabel("跳帧"))
+        stream_row.addWidget(self.frame_skip_spin)
+        stream_row.addWidget(QtWidgets.QLabel("最大FPS"))
+        stream_row.addWidget(self.max_fps_spin)
+        parent_layout.addLayout(stream_row)
+
+        cfg_row = QtWidgets.QHBoxLayout()
+        self.save_cfg_button = QtWidgets.QPushButton("保存配置")
+        self.load_cfg_button = QtWidgets.QPushButton("加载配置")
+        self.compare_button = QtWidgets.QPushButton("模型对比")
+        self.save_cfg_button.clicked.connect(self.save_current_config)
+        self.load_cfg_button.clicked.connect(self.load_saved_config)
+        self.compare_button.clicked.connect(self.compare_models_on_image)
+        cfg_row.addWidget(self.save_cfg_button)
+        cfg_row.addWidget(self.load_cfg_button)
+        cfg_row.addWidget(self.compare_button)
+        parent_layout.addLayout(cfg_row)
+
     def build_input_panel(self, parent_layout):
         parent_layout.addWidget(section_label("输入"))
         input_grid = QtWidgets.QGridLayout()
         self.image_button = QtWidgets.QPushButton("图片检测")
+        self.batch_image_button = QtWidgets.QPushButton("目录批量")
         self.video_button = QtWidgets.QPushButton("视频检测")
         self.camera_button = QtWidgets.QPushButton("摄像头实时")
         self.stop_button = QtWidgets.QPushButton("停止")
         self.image_button.clicked.connect(self.open_image)
+        self.batch_image_button.clicked.connect(self.open_image_dir)
         self.video_button.clicked.connect(self.open_video)
         self.camera_button.clicked.connect(self.open_camera)
         self.stop_button.clicked.connect(self.stop_detection)
         input_grid.addWidget(self.image_button, 0, 0)
-        input_grid.addWidget(self.video_button, 0, 1)
-        input_grid.addWidget(self.camera_button, 1, 0)
-        input_grid.addWidget(self.stop_button, 1, 1)
+        input_grid.addWidget(self.batch_image_button, 0, 1)
+        input_grid.addWidget(self.video_button, 1, 0)
+        input_grid.addWidget(self.camera_button, 1, 1)
+        input_grid.addWidget(self.stop_button, 2, 0, 1, 2)
         parent_layout.addLayout(input_grid)
 
     def build_stats_panel(self, parent_layout):
@@ -201,17 +301,31 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         parent_layout.addWidget(self.count_table, 1)
 
     def build_export_panel(self, parent_layout):
+        parent_layout.addWidget(section_label("导出与回放"))
         export_row = QtWidgets.QHBoxLayout()
         self.export_csv_button = QtWidgets.QPushButton("导出 CSV")
         self.export_json_button = QtWidgets.QPushButton("导出 JSON")
+        self.history_button = QtWidgets.QPushButton("回放 JSON")
         self.clear_button = QtWidgets.QPushButton("清空统计")
         self.export_csv_button.clicked.connect(lambda: self.export_records("csv"))
         self.export_json_button.clicked.connect(lambda: self.export_records("json"))
+        self.history_button.clicked.connect(self.replay_history)
         self.clear_button.clicked.connect(self.clear_records)
         export_row.addWidget(self.export_csv_button)
         export_row.addWidget(self.export_json_button)
         parent_layout.addLayout(export_row)
+        parent_layout.addWidget(self.history_button)
         parent_layout.addWidget(self.clear_button)
+
+    def run_startup_check(self):
+        report = run_startup_self_check()
+        dep_text = ", ".join(f"{name}:{'OK' if ok else '缺失'}" for name, ok in report["dependencies"].items())
+        self.log(f"启动自检 - 依赖: {dep_text}")
+        self.log(f"启动自检 - 设备: {', '.join(report['devices'])}")
+        self.log(f"启动自检 - 发现模型: {report['models_found']}")
+        missing = [name for name, ok in report["dependencies"].items() if not ok]
+        if missing:
+            QtWidgets.QMessageBox.warning(self, "启动自检", f"以下依赖缺失: {', '.join(missing)}")
 
     def refresh_model_list(self):
         current_path = self.model_combo.currentData()
@@ -266,19 +380,53 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self.status_value.setText("加载失败")
             self.log(f"模型加载失败：{exc}")
-            QtWidgets.QMessageBox.critical(self, "模型加载失败", str(exc))
+            QtWidgets.QMessageBox.critical(self, "模型加载失败", f"模型路径: {model_path}\n\n错误: {exc}")
         self.update_controls()
 
     def update_controls(self):
         has_model = self.detector.is_loaded
         self.image_button.setEnabled(has_model)
+        self.batch_image_button.setEnabled(has_model)
         self.video_button.setEnabled(has_model)
         self.camera_button.setEnabled(has_model)
+        self.compare_button.setEnabled(has_model)
         self.stop_button.setEnabled(self.timer.isActive())
         has_records = bool(self.records)
         self.export_csv_button.setEnabled(has_records)
         self.export_json_button.setEnabled(has_records)
         self.clear_button.setEnabled(has_records)
+
+    def detection_options(self) -> DetectionOptions:
+        return DetectionOptions(
+            confidence=self.conf_spin.value(),
+            image_size=self.imgsz_spin.value(),
+            device=resolve_device(self.device_combo.currentText()),
+        )
+
+    def start_session(self, source_type: str, source: str):
+        model_path = str(self.detector.model_path) if self.detector.model_path else ""
+        options = self.detection_options()
+        self.session_meta = SessionMetadata(
+            model_path=model_path,
+            source_type=source_type,
+            source=source,
+            device=options.device,
+            confidence=options.confidence,
+            image_size=options.image_size,
+            frame_skip=self.frame_skip_spin.value(),
+            max_fps=self.max_fps_spin.value(),
+        )
+
+    def close_session(self):
+        if self.session_meta and not self.session_meta.ended_at:
+            self.session_meta.close()
+
+    def submit_inference(self, frame, source: str, frame_index: int):
+        model_path = str(self.detector.model_path) if self.detector.model_path else ""
+        if not model_path:
+            return
+        self.infer_busy = True
+        self.infer_requested.emit(frame.copy(), self.detection_options(), model_path, source, frame_index)
 
     def open_image(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -292,13 +440,63 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         frame = cv2.imread(path)
         if frame is None:
             self.log(f"图片读取失败：{path}")
+            QtWidgets.QMessageBox.warning(self, "图片读取失败", f"无法读取图片: {path}")
             return
-        self.show_frame(self.original_view, frame)
-        self.detect_frame(frame, source=str(self.source_path), frame_index=1)
+        self.start_session(self.source_type, str(self.source_path))
         self.frame_index = 1
         self.frame_value.setText("1")
-        self.status_value.setText("图片完成")
-        self.update_controls()
+        self.show_frame(self.original_view, frame)
+        self.status_value.setText("检测中")
+        self.submit_inference(frame, source=str(self.source_path), frame_index=1)
+
+    def open_image_dir(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择图片目录", str(APP_DIR))
+        if not folder:
+            return
+        paths = [
+            path
+            for path in sorted(Path(folder).glob("*"))
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        ]
+        if not paths:
+            self.log("目录中没有可检测图片。")
+            QtWidgets.QMessageBox.information(self, "目录批量检测", "未发现支持格式的图片。")
+            return
+
+        self.stop_detection(reset_views=False)
+        self.source_type = "batch_image"
+        self.source_path = Path(folder)
+        self.start_session(self.source_type, str(self.source_path))
+        self.status_value.setText("批量检测中")
+        self.log(f"开始批量检测，共 {len(paths)} 张图片。")
+
+        for index, path in enumerate(paths, start=1):
+            frame = cv2.imread(str(path))
+            if frame is None:
+                self.log(f"跳过损坏图片：{path}")
+                continue
+            self.frame_index = index
+            self.frame_value.setText(str(index))
+            self.show_frame(self.original_view, frame)
+            try:
+                result = self.detector.predict(frame, self.detection_options())
+            except Exception as exc:
+                self.log(f"批量检测失败：{path} -> {exc}")
+                continue
+            self.show_frame(self.detected_view, result.plot())
+            self.add_records(
+                records_from_result(
+                    result,
+                    source=str(path),
+                    source_type=self.source_type,
+                    frame_index=index,
+                )
+            )
+            QtWidgets.QApplication.processEvents()
+
+        self.close_session()
+        self.status_value.setText("批量完成")
+        self.log("批量检测完成。")
 
     def open_video(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -313,10 +511,13 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         if not self.capture.isOpened():
             self.log(f"视频打开失败：{path}")
             self.capture = None
+            QtWidgets.QMessageBox.warning(self, "视频打开失败", f"无法打开视频: {path}")
             return
         fps = self.capture.get(cv2.CAP_PROP_FPS) or 25
         self.frame_index = 0
         self.last_tick.restart()
+        self.last_infer_time = 0.0
+        self.start_session(self.source_type, str(self.source_path))
         self.timer.start(max(1, int(1000 / fps)))
         self.status_value.setText("视频检测中")
         self.log(f"开始视频检测：{path}")
@@ -330,10 +531,13 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         if not self.capture.isOpened():
             self.log("摄像头打开失败。请检查系统摄像头权限。")
             self.capture = None
+            QtWidgets.QMessageBox.warning(self, "摄像头打开失败", "请检查系统权限或摄像头占用。")
             return
         self.frame_index = 0
         self.last_tick.restart()
-        self.timer.start(30)
+        self.last_infer_time = 0.0
+        self.start_session(self.source_type, "camera")
+        self.timer.start(20)
         self.status_value.setText("实时检测中")
         self.log("开始摄像头实时检测。")
         self.update_controls()
@@ -355,18 +559,26 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         elapsed = max(1, self.last_tick.restart())
         self.fps_value.setText(f"{1000 / elapsed:.1f}")
         self.show_frame(self.original_view, frame)
-        source = str(self.source_path) if self.source_path else "camera"
-        self.detect_frame(frame, source=source, frame_index=self.frame_index)
 
-    def detect_frame(self, frame, source: str, frame_index: int):
-        try:
-            result = self.detector.predict(frame, self.detection_options())
-        except Exception as exc:
-            self.log(f"检测失败：{exc}")
-            self.stop_detection(reset_views=False)
-            QtWidgets.QMessageBox.critical(self, "检测失败", str(exc))
+        skip = self.frame_skip_spin.value()
+        if (self.frame_index - 1) % (skip + 1) != 0:
             return
 
+        max_fps = self.max_fps_spin.value()
+        now = perf_counter()
+        if max_fps > 0 and (now - self.last_infer_time) < (1.0 / max_fps):
+            return
+
+        if self.infer_busy:
+            return
+
+        self.last_infer_time = now
+        source = str(self.source_path) if self.source_path else "camera"
+        self.submit_inference(frame, source=source, frame_index=self.frame_index)
+
+    @QtCore.pyqtSlot(object, str, int)
+    def on_inference_done(self, result, source: str, frame_index: int):
+        self.infer_busy = False
         self.show_frame(self.detected_view, result.plot())
         frame_records = records_from_result(
             result,
@@ -375,13 +587,18 @@ class YoloMainWindow(QtWidgets.QMainWindow):
             frame_index=frame_index,
         )
         self.add_records(frame_records)
+        if self.source_type == "image":
+            self.close_session()
+            self.status_value.setText("图片完成")
 
-    def detection_options(self) -> DetectionOptions:
-        return DetectionOptions(
-            confidence=self.conf_spin.value(),
-            image_size=self.imgsz_spin.value(),
-            device=resolve_device(self.device_combo.currentText()),
-        )
+    @QtCore.pyqtSlot(str)
+    def on_inference_failed(self, error: str):
+        self.infer_busy = False
+        self.log(f"检测失败：{error}")
+        if self.source_type in {"video", "camera"}:
+            self.stop_detection(reset_views=False)
+        self.status_value.setText("检测失败")
+        QtWidgets.QMessageBox.critical(self, "检测失败", error)
 
     def add_records(self, frame_records: list[dict]):
         self.current_counts = Counter(record["class_name"] for record in frame_records)
@@ -423,6 +640,7 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         if self.capture is not None:
             self.capture.release()
             self.capture = None
+        self.close_session()
         if reset_views:
             self.original_view.clear_frame()
             self.detected_view.clear_frame()
@@ -462,17 +680,158 @@ class YoloMainWindow(QtWidgets.QMainWindow):
             if file_type == "csv":
                 export_csv(path, self.records)
             else:
+                self.close_session()
                 model_path = str(self.detector.model_path) if self.detector.model_path else ""
-                export_json(path, self.records, model_path, self.total_counts)
+                session_payload = self.session_meta.to_payload() if self.session_meta else {}
+                history_payload = {
+                    "by_class": summarize_by_class(self.records),
+                    "by_hour": summarize_by_hour(self.records),
+                }
+                export_json(
+                    path,
+                    self.records,
+                    model_path,
+                    self.total_counts,
+                    session=session_payload,
+                    history=history_payload,
+                )
             self.log(f"检测结果已导出：{path}")
         except Exception as exc:
             self.log(f"导出失败：{exc}")
-            QtWidgets.QMessageBox.critical(self, "导出失败", str(exc))
+            QtWidgets.QMessageBox.critical(self, "导出失败", f"路径: {path}\n\n错误: {exc}")
+
+    def save_current_config(self):
+        payload = {
+            "model_path": self.model_combo.currentData() or "",
+            "confidence": self.conf_spin.value(),
+            "image_size": self.imgsz_spin.value(),
+            "device": self.device_combo.currentText(),
+            "frame_skip": self.frame_skip_spin.value(),
+            "max_fps": self.max_fps_spin.value(),
+        }
+        save_task_config(TASK_CONFIG_FILE, payload)
+        self.log(f"配置已保存：{TASK_CONFIG_FILE}")
+
+    def load_saved_config(self):
+        if not TASK_CONFIG_FILE.exists():
+            self.log("未发现保存配置。")
+            QtWidgets.QMessageBox.information(self, "加载配置", "当前还没有保存的配置文件。")
+            return
+        try:
+            cfg = load_task_config(TASK_CONFIG_FILE)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "加载配置失败", str(exc))
+            return
+
+        model_path = cfg.get("model_path", "")
+        if model_path:
+            index = self.model_combo.findData(model_path)
+            if index < 0:
+                self.model_combo.addItem(Path(model_path).name, model_path)
+                index = self.model_combo.count() - 1
+            self.model_combo.setCurrentIndex(index)
+        self.conf_spin.setValue(float(cfg.get("confidence", 0.5)))
+        self.imgsz_spin.setValue(int(cfg.get("image_size", 640)))
+        device = cfg.get("device", "auto")
+        device_index = self.device_combo.findText(device)
+        if device_index >= 0:
+            self.device_combo.setCurrentIndex(device_index)
+        self.frame_skip_spin.setValue(int(cfg.get("frame_skip", 0)))
+        self.max_fps_spin.setValue(int(cfg.get("max_fps", 30)))
+        self.log(f"配置已加载：{TASK_CONFIG_FILE}")
+
+    def compare_models_on_image(self):
+        if not self.detector.model_path:
+            QtWidgets.QMessageBox.warning(self, "模型对比", "请先加载当前模型。")
+            return
+
+        image_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择对比图片", str(APP_DIR), IMAGE_FILTER
+        )
+        if not image_path:
+            return
+        frame = cv2.imread(image_path)
+        if frame is None:
+            QtWidgets.QMessageBox.warning(self, "模型对比", "图片读取失败。")
+            return
+
+        model_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "选择第二个模型",
+            str(APP_DIR),
+            "YOLO Models (*.pt *.onnx *.engine)",
+        )
+        if not model_path:
+            return
+
+        try:
+            results = compare_models(
+                [str(self.detector.model_path), model_path],
+                frame,
+                self.detection_options(),
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "模型对比失败", str(exc))
+            return
+
+        lines = [
+            f"{Path(item['model']).name}: {item['inference_ms']} ms, detections={item['detections']}"
+            for item in results
+        ]
+        summary = "\n".join(lines)
+        self.log(f"模型对比结果: {summary.replace(chr(10), ' | ')}")
+        QtWidgets.QMessageBox.information(self, "模型对比结果", summary)
+
+    def replay_history(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "选择历史 JSON",
+            str(EXPORT_DIR if EXPORT_DIR.exists() else APP_DIR),
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "回放失败", str(exc))
+            return
+
+        records = payload.get("records", [])
+        if not isinstance(records, list) or not records:
+            QtWidgets.QMessageBox.warning(self, "回放", "JSON 中没有可用 records。")
+            return
+
+        self.clear_records()
+        self.records = records
+        self.total_counts = Counter(record.get("class_name", "unknown") for record in records)
+        last_frame = max(int(record.get("frame", 0)) for record in records)
+        self.current_counts = Counter(
+            record.get("class_name", "unknown")
+            for record in records
+            if int(record.get("frame", 0)) == last_frame
+        )
+        self.frame_index = last_frame
+        self.frame_value.setText(str(last_frame))
+        self.current_value.setText(str(sum(self.current_counts.values())))
+        self.total_value.setText(str(sum(self.total_counts.values())))
+        self.status_value.setText("历史回放")
+        self.update_count_table()
+        by_class = summarize_by_class(records)
+        by_hour = summarize_by_hour(records)
+        self.log(f"历史回放完成：{path}")
+        self.log(f"历史统计-类别：{by_class}")
+        self.log(f"历史统计-时间：{by_hour}")
+        self.update_controls()
 
     def closeEvent(self, event):
         self.stop_detection(reset_views=False)
+        self.infer_thread.quit()
+        self.infer_thread.wait(1000)
         super().closeEvent(event)
 
     def log(self, message: str):
         stamp = datetime.now().strftime("%H:%M:%S")
         self.log_box.append(f"[{stamp}] {message}")
+        self.logger.info(message)
