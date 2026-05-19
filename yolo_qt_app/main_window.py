@@ -31,6 +31,7 @@ from .exporter import export_csv, export_json
 from .history import summarize_by_class, summarize_by_hour
 from .image_utils import frame_to_pixmap
 from .model_finder import find_models
+from .first_run import is_first_run, mark_first_run_complete
 from .self_check import run_startup_self_check
 from .session import SessionMetadata
 from .styles import APP_STYLE
@@ -318,14 +319,39 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         parent_layout.addWidget(self.history_button)
         parent_layout.addWidget(self.clear_button)
     def run_startup_check(self):
+        if not is_first_run():
+            self.log("首次启动自检已完成，跳过自动检查。")
+            return
+
         report = run_startup_self_check()
         dep_text = ", ".join(f"{name}:{'OK' if ok else '缺失'}" for name, ok in report["dependencies"].items())
-        self.log(f"启动自检 - 依赖: {dep_text}")
-        self.log(f"启动自检 - 设备: {', '.join(report['devices'])}")
-        self.log(f"启动自检 - 发现模型: {report['models_found']}")
+        self.log(f"首次启动自检 - 依赖: {dep_text}")
+        self.log(f"首次启动自检 - 设备: {', '.join(report['devices'])}")
+        self.log(f"首次启动自检 - GPU: {', '.join(report['gpu_devices']) if report['gpu_devices'] else '未发现可用 GPU'}")
+        self.log(f"首次启动自检 - 发现模型: {report['models_found']}")
+
         missing = [name for name, ok in report["dependencies"].items() if not ok]
+        bad_models = [item["path"] for item in report["model_paths"] if not item["readable"]]
+        issues = []
         if missing:
-            QtWidgets.QMessageBox.warning(self, "启动自检", f"以下依赖缺失: {', '.join(missing)}")
+            issues.append(f"依赖缺失: {', '.join(missing)}")
+        if report["models_found"] == 0:
+            issues.append("未发现模型文件")
+        if bad_models:
+            issues.append(f"模型路径不可读: {', '.join(bad_models)}")
+
+        if issues:
+            QtWidgets.QMessageBox.warning(self, "首次运行自检", "\n".join(issues))
+        else:
+            QtWidgets.QMessageBox.information(
+                self,
+                "首次运行自检",
+                f"依赖、设备与模型路径检查通过。\n"
+                f"GPU: {', '.join(report['gpu_devices']) if report['gpu_devices'] else '未发现可用 GPU'}\n"
+                f"模型数量: {report['models_found']}",
+            )
+
+        mark_first_run_complete()
 
     def refresh_model_list(self):
         current_path = self.model_combo.currentData()
