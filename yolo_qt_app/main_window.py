@@ -317,7 +317,6 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         parent_layout.addLayout(export_row)
         parent_layout.addWidget(self.history_button)
         parent_layout.addWidget(self.clear_button)
-
     def run_startup_check(self):
         report = run_startup_self_check()
         dep_text = ", ".join(f"{name}:{'OK' if ok else '缺失'}" for name, ok in report["dependencies"].items())
@@ -400,7 +399,6 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         self.export_csv_button.setEnabled(has_records)
         self.export_json_button.setEnabled(has_records)
         self.clear_button.setEnabled(has_records)
-
     def detection_options(self) -> DetectionOptions:
         return DetectionOptions(
             confidence=self.conf_spin.value(),
