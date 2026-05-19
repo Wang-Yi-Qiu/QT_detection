@@ -85,12 +85,14 @@ def detect_export_type(path: str | Path) -> str:
 
 
 def _with_metadata(records: list[dict], metadata: dict | None) -> list[dict]:
+    """Merge session metadata into row-level export columns using session_* prefix."""
     if not metadata:
         return records
     rows = []
     for record in records:
         row = dict(record)
         for key, value in metadata.items():
-            row[f"session_{key}"] = value
+            normalized_key = key if str(key).startswith("session_") else f"session_{key}"
+            row[normalized_key] = value
         rows.append(row)
     return rows

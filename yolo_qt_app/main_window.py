@@ -13,11 +13,16 @@ from .app_logging import get_app_logger
 from .config import (
     APP_DIR,
     BATCH_IMAGE_FILTER,
+    BATCH_PROCESSING_DELAY_MS,
     CONFIG_DIR,
+    DEFAULT_WINDOW_HEIGHT,
+    DEFAULT_WINDOW_WIDTH,
     EXPORT_DIR,
     EXPORT_FILTER,
+    IMAGE_SUFFIXES,
     IMAGE_FILTER,
     MODEL_FILE_FILTER,
+    THREAD_SHUTDOWN_TIMEOUT_MS,
     VIDEO_FILTER,
 )
 from .detector import (
@@ -78,7 +83,7 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         self.records: list[dict] = []
         self.current_counts = Counter()
         self.total_counts = Counter()
-        self.session_id = self.new_session_id()
+        self.session_id = self.generate_session_id()
         self.session_started_at = datetime.now()
 
         self.timer = QtCore.QTimer(self)
@@ -98,12 +103,12 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         self.update_controls()
         self.run_first_self_check()
 
-    def new_session_id(self) -> str:
+    def generate_session_id(self) -> str:
         return uuid.uuid4().hex[:12]
 
     def build_ui(self):
         self.setWindowTitle("YOLO 实时检测与统计导出")
-        self.resize(1440, 860)
+        self.resize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -421,8 +426,7 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         self.start_next_batch_image()
 
     def collect_images_from_dir(self, directory: Path) -> list[Path]:
-        suffixes = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-        return sorted([p for p in directory.rglob("*") if p.is_file() and p.suffix.lower() in suffixes])
+        return sorted([p for p in directory.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES])
 
     def start_next_batch_image(self):
         if not self.batch_queue:
@@ -557,7 +561,7 @@ class YoloMainWindow(QtWidgets.QMainWindow):
             self.status_value.setText("图片完成")
         elif self.source_type == "batch_image":
             self.status_value.setText("批量检测中")
-            QtCore.QTimer.singleShot(1, self.start_next_batch_image)
+            QtCore.QTimer.singleShot(BATCH_PROCESSING_DELAY_MS, self.start_next_batch_image)
 
     def on_inference_failed(self, message: str, source: str, frame_index: int):
         self.log(f"检测失败：source={source}, frame={frame_index}, error={message}", "error")
@@ -626,7 +630,7 @@ class YoloMainWindow(QtWidgets.QMainWindow):
             self.capture = None
         if self.infer_thread is not None and self.infer_thread.isRunning():
             self.infer_thread.quit()
-            self.infer_thread.wait(1500)
+            self.infer_thread.wait(THREAD_SHUTDOWN_TIMEOUT_MS)
         if reset_views:
             self.original_view.clear_frame()
             self.detected_view.clear_frame()
@@ -639,7 +643,7 @@ class YoloMainWindow(QtWidgets.QMainWindow):
         self.records.clear()
         self.current_counts.clear()
         self.total_counts.clear()
-        self.session_id = self.new_session_id()
+        self.session_id = self.generate_session_id()
         self.session_started_at = datetime.now()
         self.frame_index = 0
         self.frame_value.setText("0")
@@ -784,9 +788,13 @@ class YoloMainWindow(QtWidgets.QMainWindow):
                 start = time.perf_counter()
                 result = det.predict(frame, self.detection_options())
                 ms = (time.perf_counter() - start) * 1000
-                records = records_from_result(result, source=image_path, source_type="compare", frame_index=1)
-                avg_conf = round(sum(r["confidence"] for r in records) / len(records), 4) if records else 0.0
-                results.append((Path(model_path).name, ms, len(records), avg_conf))
+                boxes = result.boxes
+                count = len(boxes) if boxes is not None else 0
+                avg_conf = 0.0
+                if boxes is not None and count > 0:
+                    conf_tensor = boxes.conf.detach().cpu()
+                    avg_conf = round(float(conf_tensor.mean().item()), 4)
+                results.append((Path(model_path).name, ms, count, avg_conf))
             except Exception as exc:
                 results.append((Path(model_path).name, -1.0, 0, 0.0))
                 self.log(f"模型对比失败：{model_path} -> {exc}", "error")

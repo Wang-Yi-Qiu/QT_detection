@@ -40,8 +40,15 @@ MODEL_FILE_FILTER = (
 IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.webp)"
 VIDEO_FILTER = "Videos (*.mp4 *.avi *.mov *.mkv *.m4v)"
 BATCH_IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.webp)"
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 EXPORT_FILTER = (
     "CSV (*.csv);;JSON (*.json);;TSV (*.tsv);;TXT Summary (*.txt)"
 )
 
 MODEL_SEARCH_ROOTS = [APP_DIR, WORKSPACE_DIR]
+
+DEFAULT_WINDOW_WIDTH = 1440
+DEFAULT_WINDOW_HEIGHT = 860
+THREAD_SHUTDOWN_TIMEOUT_MS = 1500
+BATCH_PROCESSING_DELAY_MS = 1
+HISTORY_MAX_LINES = 2000

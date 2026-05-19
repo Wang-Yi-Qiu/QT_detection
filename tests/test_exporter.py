@@ -59,8 +59,8 @@ class ExporterTests(unittest.TestCase):
             export_csv(csv_path, self.records, self.metadata)
             export_tsv(tsv_path, self.records, self.metadata)
             export_txt_summary(txt_path, self.records, self.counts, self.metadata)
-            self.assertIn("session_session_id", csv_path.read_text(encoding="utf-8-sig"))
-            self.assertIn("session_session_id", tsv_path.read_text(encoding="utf-8"))
+            self.assertIn("session_id", csv_path.read_text(encoding="utf-8-sig"))
+            self.assertIn("session_id", tsv_path.read_text(encoding="utf-8"))
             self.assertIn("会话元数据", txt_path.read_text(encoding="utf-8"))
 
 

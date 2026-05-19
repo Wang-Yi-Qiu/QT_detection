@@ -1,9 +1,14 @@
 import unittest
 from unittest.mock import patch
 
-from yolo_qt_app.detector import available_devices, resolve_device
+try:
+    from yolo_qt_app.detector import available_devices, resolve_device
+except ModuleNotFoundError:  # pragma: no cover
+    available_devices = None
+    resolve_device = None
 
 
+@unittest.skipIf(available_devices is None or resolve_device is None, "torch/ultralytics not installed")
 class DetectorUtilityTests(unittest.TestCase):
     @patch("yolo_qt_app.detector.torch.cuda.is_available", return_value=False)
     @patch("yolo_qt_app.detector.torch.backends.mps.is_available", return_value=False)
