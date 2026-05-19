@@ -40,7 +40,10 @@ def _check_model_paths(models: list[Path]) -> list[dict]:
 def run_startup_self_check() -> dict:
     dep_status: dict[str, bool] = {}
     for name in REQUIRED_MODULES:
-        dep_status[name] = importlib.util.find_spec(name) is not None
+        try:
+            dep_status[name] = importlib.util.find_spec(name) is not None
+        except Exception:
+            dep_status[name] = False
 
     devices = available_devices()
     gpu_devices = [name for name in devices if name in {"cuda", "mps"}]
