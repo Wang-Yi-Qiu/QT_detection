@@ -18,6 +18,8 @@ def export_json(
     records: list[dict],
     model_path: str,
     total_counts: Counter,
+    session: dict | None = None,
+    history: dict | None = None,
 ):
     if not records:
         raise ValueError("暂无检测结果可导出。")
@@ -25,6 +27,8 @@ def export_json(
         "model": model_path,
         "total": sum(total_counts.values()),
         "counts": dict(total_counts),
+        "session": session or {},
+        "history": history or {},
         "records": records,
     }
     with open(path, "w", encoding="utf-8") as handle:

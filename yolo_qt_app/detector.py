@@ -1,9 +1,17 @@
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 
-import torch
-from ultralytics import YOLO
+try:
+    import torch
+except Exception:  # pragma: no cover - defensive import for runtime envs
+    torch = None
+
+try:
+    from ultralytics import YOLO
+except Exception:  # pragma: no cover - defensive import for runtime envs
+    YOLO = None
 
 
 @dataclass
@@ -23,6 +31,8 @@ class YoloDetector:
         return self.model is not None
 
     def load(self, model_path: str | Path):
+        if YOLO is None:
+            raise RuntimeError("未检测到 ultralytics，请先安装依赖。")
         self.model_path = Path(model_path)
         self.model = YOLO(str(self.model_path))
 
@@ -40,6 +50,8 @@ class YoloDetector:
 
 def available_devices() -> list[str]:
     devices = ["auto", "cpu"]
+    if torch is None:
+        return devices
     if torch.cuda.is_available():
         devices.append("cuda")
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -50,11 +62,31 @@ def available_devices() -> list[str]:
 def resolve_device(device: str) -> str:
     if device != "auto":
         return device
-    if torch.cuda.is_available():
+    if torch is not None and torch.cuda.is_available():
         return "cuda"
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    if torch is not None and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+def compare_models(model_paths: list[str], frame, options: DetectionOptions) -> list[dict]:
+    summary = []
+    for path in model_paths:
+        detector = YoloDetector()
+        detector.load(path)
+        start = perf_counter()
+        result = detector.predict(frame, options)
+        elapsed_ms = (perf_counter() - start) * 1000
+        boxes = result.boxes
+        count = 0 if boxes is None else len(boxes)
+        summary.append(
+            {
+                "model": str(path),
+                "inference_ms": round(elapsed_ms, 2),
+                "detections": int(count),
+            }
+        )
+    return summary
 
 
 def records_from_result(result, source: str, source_type: str, frame_index: int) -> list[dict]:
