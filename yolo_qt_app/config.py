@@ -13,5 +13,6 @@ IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.webp)"
 VIDEO_FILTER = "Videos (*.mp4 *.avi *.mov *.mkv *.m4v)"
 
 TASK_CONFIG_FILE = CONFIG_DIR / "last_task_config.json"
+FIRST_RUN_MARKER_FILE = CONFIG_DIR / ".startup_self_check_done"
 
 MODEL_SEARCH_ROOTS = [APP_DIR, WORKSPACE_DIR]
